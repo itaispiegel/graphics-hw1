@@ -2,6 +2,7 @@ import argparse
 
 import cv2
 import numpy as np
+from sklearn.mixture import GaussianMixture
 
 GC_BGD = 0  # Hard bg pixel
 GC_FGD = 1  # Hard fg pixel, will not be used
@@ -38,10 +39,18 @@ def grabcut(img, rect, n_iter=5):
     return mask, bgGMM, fgGMM
 
 
-def initalize_GMMs(img, mask):
+def initalize_GMMs(img, mask, n_components: int = 5):
     # TODO: implement initalize_GMMs
-    bgGMM = None
-    fgGMM = None
+
+    bg_indexes = np.column_stack(
+        np.where(np.logical_or(mask == GC_BGD, mask == GC_PR_BGD))
+    )
+    fg_indexes = np.column_stack(
+        np.where(np.logical_or(mask == GC_FGD, mask == GC_PR_FGD))
+    )
+
+    bgGMM = GaussianMixture(n_components).fit(bg_indexes)
+    fgGMM = GaussianMixture(n_components).fit(fg_indexes)
 
     return bgGMM, fgGMM
 
