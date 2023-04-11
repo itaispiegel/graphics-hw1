@@ -2,12 +2,64 @@ import argparse
 
 import cv2
 import numpy as np
-from sklearn.mixture import GaussianMixture
+from sklearn.cluster import KMeans
 
 GC_BGD = 0  # Hard bg pixel
 GC_FGD = 1  # Hard fg pixel, will not be used
 GC_PR_BGD = 2  # Soft bg pixel
 GC_PR_FGD = 3  # Soft fg pixel
+
+
+def require_initialization(func):
+    def wrapper(self, *args, **kwargs):
+        if not self._initialized:
+            raise ValueError("Instance not initialized")
+        return func(self, *args, **kwargs)
+
+    return wrapper
+
+
+class Component:
+    def __init__(self, data_points, mean, total_points_count):
+        self.data_points = data_points
+        self.mean = mean
+        self.covariance_matrix = np.cov(self.data_points, rowvar=False)
+        self.covariance_matrix_det = np.linalg.det(self.covariance_matrix)
+        self.covariance_matrix_inverse = np.linalg.inv(self.covariance_matrix)
+        self.weight = len(data_points) / total_points_count
+
+    def pdf(self, x):
+        d = self.mean.shape[0]
+        norm = np.sqrt((2 * np.pi) ** d * self.covariance_matrix_det)
+        exponent = (
+            -0.5 * (x - self.mean).T @ self.covariance_matrix_inverse @ (x - self.mean)
+        )
+        return (1 / norm) * np.exp(exponent)
+
+
+class GaussianMixture:
+    def __init__(self, n_components: int):
+        self.n_components = n_components
+        self._kmeans = KMeans(n_components, n_init="auto")
+        self._initialized = False
+        self.components = None
+        self.data_points = None
+
+    def init(self, X):
+        if self._initialized:
+            raise ValueError("Already initialized")
+        self._initialized = True
+        self.data_points = X
+        labels = self._kmeans.fit_predict(X)
+
+        self.components = []
+        for i in range(self.n_components):
+            component = Component(
+                X[np.where(labels == i)], self._kmeans.cluster_centers_[i], len(X)
+            )
+            self.components.append(component)
+
+        return self
 
 
 # Define the GrabCut algorithm function
@@ -42,15 +94,11 @@ def grabcut(img, rect, n_iter=5):
 def initalize_GMMs(img, mask, n_components: int = 5):
     # TODO: implement initalize_GMMs
 
-    bg_indexes = np.column_stack(
-        np.where(np.logical_or(mask == GC_BGD, mask == GC_PR_BGD))
-    )
-    fg_indexes = np.column_stack(
-        np.where(np.logical_or(mask == GC_FGD, mask == GC_PR_FGD))
-    )
+    bg_pixels = img[np.logical_or(mask == GC_BGD, mask == GC_PR_BGD)]
+    fg_pixels = img[np.logical_or(mask == GC_FGD, mask == GC_PR_FGD)]
 
-    bgGMM = GaussianMixture(n_components).fit(bg_indexes)
-    fgGMM = GaussianMixture(n_components).fit(fg_indexes)
+    bgGMM = GaussianMixture(n_components).init(bg_pixels)
+    fgGMM = GaussianMixture(n_components).init(fg_pixels)
 
     return bgGMM, fgGMM
 
