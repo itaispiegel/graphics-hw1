@@ -20,9 +20,11 @@ def require_initialization(func):
 
 
 class Component:
-    def __init__(self, data_points, mean, total_points_count):
+    def __init__(self, data_points, total_points_count, mean=None):
         self.data_points = data_points
         self.mean = mean
+        if self.mean is None:
+            self.mean = np.mean(data_points, axis=0)
         self.covariance_matrix = np.cov(self.data_points, rowvar=False)
         self.covariance_matrix_det = np.linalg.det(self.covariance_matrix)
         self.covariance_matrix_inverse = np.linalg.inv(self.covariance_matrix)
@@ -55,11 +57,29 @@ class GaussianMixture:
         self.components = []
         for i in range(self.n_components):
             component = Component(
-                X[np.where(labels == i)], self._kmeans.cluster_centers_[i], len(X)
+                X[np.where(labels == i)], len(X), mean=self._kmeans.cluster_centers_[i]
             )
             self.components.append(component)
 
         return self
+
+    def assign_point_to_component(self, point):
+        scores = [component.pdf(point) for component in self.components]
+        return np.argmax(scores)
+
+    def update(self, X):
+        labels = np.fromiter((self.assign_point_to_component(x) for x in X), dtype=int)
+        updated_components = []
+        for i in range(self.n_components):
+            component = Component(X[np.where(labels == i)], len(X))
+            updated_components.append(component)
+        self.components = updated_components
+
+
+def partition_pixels(img, mask):
+    bg_pixels = img[np.logical_or(mask == GC_BGD, mask == GC_PR_BGD)]
+    fg_pixels = img[np.logical_or(mask == GC_FGD, mask == GC_PR_FGD)]
+    return bg_pixels, fg_pixels
 
 
 # Define the GrabCut algorithm function
@@ -93,19 +113,18 @@ def grabcut(img, rect, n_iter=5):
 
 def initalize_GMMs(img, mask, n_components: int = 5):
     # TODO: implement initalize_GMMs
-
-    bg_pixels = img[np.logical_or(mask == GC_BGD, mask == GC_PR_BGD)]
-    fg_pixels = img[np.logical_or(mask == GC_FGD, mask == GC_PR_FGD)]
-
+    bg_pixels, fg_pixels = partition_pixels(img, mask)
     bgGMM = GaussianMixture(n_components).init(bg_pixels)
     fgGMM = GaussianMixture(n_components).init(fg_pixels)
-
     return bgGMM, fgGMM
 
 
 # Define helper functions for the GrabCut algorithm
 def update_GMMs(img, mask, bgGMM, fgGMM):
     # TODO: implement GMM component assignment step
+    bg_pixels, fg_pixels = partition_pixels(img, mask)
+    bgGMM.update(bg_pixels)
+    fgGMM.update(fg_pixels)
     return bgGMM, fgGMM
 
 
