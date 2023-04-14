@@ -1,6 +1,8 @@
 import argparse
+import itertools
 
 import cv2
+import igraph as ig
 import numpy as np
 from sklearn.cluster import KMeans
 
@@ -75,11 +77,25 @@ class GaussianMixture:
             updated_components.append(component)
         self.components = updated_components
 
+    def calc_prob(self, X):
+        prob = [c.pdf(x) for x in X for c in self.components]
+        weights = [c.weight for c in self.components]
+        return np.dot(weights, prob)
+
 
 def partition_pixels(img, mask):
     bg_pixels = img[np.logical_or(mask == GC_BGD, mask == GC_PR_BGD)]
     fg_pixels = img[np.logical_or(mask == GC_FGD, mask == GC_PR_FGD)]
     return bg_pixels, fg_pixels
+
+
+def partition_pixels_indexes(img, mask):
+    flattened_mask = mask.reshape(-1)
+    bgd_idxs = np.where(flattened_mask == GC_BGD)[0]
+    fgd_idxs = np.where(flattened_mask == GC_FGD)[0]
+    pr_bgd_idxs = np.where(flattened_mask == GC_PR_BGD)[0]
+    pr_fgd_idxs = np.where(flattened_mask == GC_PR_FGD)[0]
+    return bgd_idxs, fgd_idxs, pr_bgd_idxs, pr_fgd_idxs
 
 
 # Define the GrabCut algorithm function
@@ -132,6 +148,40 @@ def calculate_mincut(img, mask, bgGMM, fgGMM):
     # TODO: implement energy (cost) calculation step and mincut
     min_cut = [[], []]
     energy = 0
+
+    # Build graph
+    bgd_idxs, fgd_idxs, pr_bgd_idxs, pr_fgd_idxs = partition_pixels_indexes(img, mask)
+    unk_idxs = np.concatenate((pr_bgd_idxs, pr_fgd_idxs))
+    rows, cols, _ = img.shape
+    src_vertex = rows * cols
+    sink_vertex = src_vertex + 1
+
+    src_to_unk_edges = zip([src_vertex] * len(unk_idxs), unk_idxs)
+    unk_to_sink_edges = zip(unk_idxs, [sink_vertex] * len(unk_idxs))
+    src_to_bgd_edges = zip([src_vertex] * len(bgd_idxs), bgd_idxs)
+    bgd_to_sink = zip(bgd_idxs, [sink_vertex] * len(bgd_idxs))
+    src_to_fgd_edges = zip([src_vertex] * len(fgd_idxs), fgd_idxs)
+    fgd_to_sink_edges = zip(fgd_idxs, [sink_vertex] * len(fgd_idxs))
+
+    src_to_unk_capacities = -np.log(bgGMM.calc_prob(img.reshape(-1, 3)[unk_idxs]))
+    unk_to_sink_capcities = []
+    src_to_bgd_capacities = itertools.repeat(0, bgd_idxs.size)
+    bgd_to_sink_capacities = itertools.repeat(bgGMM.n_components, bgd_idxs.size)
+    src_to_fgd_capacities = itertools.repeat(fgGMM.n_components, fgd_idxs.size)
+    fgd_to_sink_capacities = itertools.repeat(0, fgd_idxs.size)
+
+    edges = itertools.chain(
+        src_to_unk_edges,
+        unk_to_sink_edges,
+        src_to_bgd_edges,
+        bgd_to_sink,
+        src_to_fgd_edges,
+        fgd_to_sink_edges,
+    )
+
+    # t-links
+    graph = ig.Graph(n=rows * cols + 2, edges=edges)
+
     return min_cut, energy
 
 
