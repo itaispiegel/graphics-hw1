@@ -1,5 +1,6 @@
 import argparse
 import itertools
+from functools import cache
 
 import cv2
 import igraph as ig
@@ -98,6 +99,156 @@ def partition_pixels_indexes(img, mask):
     return bgd_idxs, fgd_idxs, pr_bgd_idxs, pr_fgd_idxs
 
 
+def t_link_edges_and_capacities(img, mask, bgGMM, fgGMM):
+    bgd_idxs, fgd_idxs, pr_bgd_idxs, pr_fgd_idxs = partition_pixels_indexes(img, mask)
+    unk_idxs = np.concatenate((pr_bgd_idxs, pr_fgd_idxs))
+    rows, cols, _ = img.shape
+    src_vertex = rows * cols
+    sink_vertex = src_vertex + 1
+
+    src_to_unk_edges = zip([src_vertex] * len(unk_idxs), unk_idxs)
+    unk_to_sink_edges = zip(unk_idxs, [sink_vertex] * len(unk_idxs))
+    src_to_bgd_edges = zip([src_vertex] * len(bgd_idxs), bgd_idxs)
+    bgd_to_sink = zip(bgd_idxs, [sink_vertex] * len(bgd_idxs))
+    src_to_fgd_edges = zip([src_vertex] * len(fgd_idxs), fgd_idxs)
+    fgd_to_sink_edges = zip(fgd_idxs, [sink_vertex] * len(fgd_idxs))
+
+    src_to_unk_capacities = -np.log(
+        bgGMM.calc_prob(img.reshape(-1, 3)[unk_idxs])
+    )  # FIXME
+    unk_to_sink_capcities = -np.log(
+        bgGMM.calc_prob(img.reshape(-1, 3)[unk_idxs])
+    )  # FIXME
+    src_to_bgd_capacities = itertools.repeat(0, bgd_idxs.size)
+    bgd_to_sink_capacities = itertools.repeat(
+        bgGMM.n_components, bgd_idxs.size
+    )  # FIXME Is this the right value?
+    src_to_fgd_capacities = itertools.repeat(
+        fgGMM.n_components, fgd_idxs.size
+    )  # FIXME Is this the right value?
+    fgd_to_sink_capacities = itertools.repeat(0, fgd_idxs.size)
+
+    t_link_edges = itertools.chain(
+        src_to_unk_edges,
+        unk_to_sink_edges,
+        src_to_bgd_edges,
+        bgd_to_sink,
+        src_to_fgd_edges,
+        fgd_to_sink_edges,
+    )
+
+    t_link_capacities = itertools.chain(
+        src_to_unk_capacities,
+        unk_to_sink_capcities,
+        src_to_bgd_capacities,
+        bgd_to_sink_capacities,
+        src_to_fgd_capacities,
+        fgd_to_sink_capacities,
+    )
+
+    return t_link_edges, t_link_capacities
+
+
+@cache
+def calculate_beta(img):
+    beta = 0
+    rows, cols, _ = img.shape
+    for y in range(rows):
+        for x in range(cols):
+            color = img[y, x]
+            if x > 0:
+                diff = color - img[y, x - 1]
+                beta += diff.dot(diff)
+            if y > 0 and x > 0:
+                diff = color - img[y - 1, x - 1]
+                beta += diff.dot(diff)
+            if y > 0:
+                diff = color - img[y - 1, x]
+                beta += diff.dot(diff)
+            if y > 0 and x < cols - 1:
+                diff = color - img[y - 1, x + 1]
+                beta += diff.dot(diff)
+    return 1.0 / (2 * beta / (4 * cols * rows - 3 * cols - 3 * rows + 2))
+
+
+@cache
+def n_link_edges_and_capcities(img):
+    gamma = 50
+    beta = calculate_beta(img)
+    (
+        img_without_left_col,
+        img_without_right_col,
+        img_without_left_col_and_top_row,
+        img_without_right_col_and_right_row,
+        img_without_top_row,
+        img_without_bottom_row,
+        img_without_right_col_and_top_row,
+        img_without_left_col_and_bottom_row,
+    ) = (
+        img[:, 1:],
+        img[:, :-1],
+        img[1:, 1:],
+        img[:-1, :-1],
+        img[1:, :],
+        img[:-1, :],
+        img[1:, :-1],
+        img[:-1, 1:],
+    )
+
+    left_diff = img_without_left_col - img_without_right_col
+    upleft_diff = img_without_left_col_and_top_row - img_without_right_col_and_right_row
+    up_diff = img_without_top_row - img_without_bottom_row
+    upright_diff = (
+        img_without_right_col_and_top_row - img_without_left_col_and_bottom_row
+    )
+    left_V = gamma * np.exp(-beta * np.sum(np.square(left_diff), axis=2))
+    upleft_V = (
+        gamma / np.sqrt(2) * np.exp(-beta * np.sum(np.square(upleft_diff), axis=2))
+    )
+    up_V = gamma * np.exp(-beta * np.sum(np.square(up_diff), axis=2))
+    upright_V = (
+        gamma / np.sqrt(2) * np.exp(-beta * np.sum(np.square(upright_diff), axis=2))
+    )
+
+    n_link_edges = itertools.chain(
+        zip(img_without_left_col.reshape(-1), img_without_right_col.reshape(-1)),
+        zip(
+            img_without_left_col_and_top_row.reshape(-1),
+            img_without_right_col_and_right_row.reshape(-1),
+        ),
+        zip(img_without_top_row.reshape(-1), img_without_bottom_row.reshape(-1)),
+        zip(
+            img_without_right_col_and_top_row.reshape(-1),
+            img_without_left_col_and_bottom_row.reshape(-1),
+        ),
+    )
+
+    n_link_capacities = np.concatenate(
+        (
+            left_V.reshape(-1),
+            upleft_V.reshape(-1),
+            up_V.reshape(-1),
+            upright_V.reshape(-1),
+        )
+    )
+
+    return n_link_edges, n_link_capacities
+
+
+def construct_graph(img, mask, bgGMM, fgGMM):
+    rows, cols, _ = img.shape
+    t_link_edges, t_link_capacities = t_link_edges_and_capacities(
+        img, mask, bgGMM, fgGMM
+    )
+    n_link_edges, n_link_capacities = n_link_edges_and_capcities(img)
+
+    edges = itertools.chain(t_link_edges, n_link_edges)
+    capacities = itertools.chain(t_link_capacities, n_link_capacities)
+    graph = ig.Graph(n=rows * cols + 2, edges=edges)
+    graph.es["capacity"] = capacities
+    return graph
+
+
 # Define the GrabCut algorithm function
 def grabcut(img, rect, n_iter=5):
     # Assign initial labels to the pixels based on the bounding box
@@ -149,38 +300,7 @@ def calculate_mincut(img, mask, bgGMM, fgGMM):
     min_cut = [[], []]
     energy = 0
 
-    # Build graph
-    bgd_idxs, fgd_idxs, pr_bgd_idxs, pr_fgd_idxs = partition_pixels_indexes(img, mask)
-    unk_idxs = np.concatenate((pr_bgd_idxs, pr_fgd_idxs))
-    rows, cols, _ = img.shape
-    src_vertex = rows * cols
-    sink_vertex = src_vertex + 1
-
-    src_to_unk_edges = zip([src_vertex] * len(unk_idxs), unk_idxs)
-    unk_to_sink_edges = zip(unk_idxs, [sink_vertex] * len(unk_idxs))
-    src_to_bgd_edges = zip([src_vertex] * len(bgd_idxs), bgd_idxs)
-    bgd_to_sink = zip(bgd_idxs, [sink_vertex] * len(bgd_idxs))
-    src_to_fgd_edges = zip([src_vertex] * len(fgd_idxs), fgd_idxs)
-    fgd_to_sink_edges = zip(fgd_idxs, [sink_vertex] * len(fgd_idxs))
-
-    src_to_unk_capacities = -np.log(bgGMM.calc_prob(img.reshape(-1, 3)[unk_idxs]))
-    unk_to_sink_capcities = []
-    src_to_bgd_capacities = itertools.repeat(0, bgd_idxs.size)
-    bgd_to_sink_capacities = itertools.repeat(bgGMM.n_components, bgd_idxs.size)
-    src_to_fgd_capacities = itertools.repeat(fgGMM.n_components, fgd_idxs.size)
-    fgd_to_sink_capacities = itertools.repeat(0, fgd_idxs.size)
-
-    edges = itertools.chain(
-        src_to_unk_edges,
-        unk_to_sink_edges,
-        src_to_bgd_edges,
-        bgd_to_sink,
-        src_to_fgd_edges,
-        fgd_to_sink_edges,
-    )
-
-    # t-links
-    graph = ig.Graph(n=rows * cols + 2, edges=edges)
+    graph = construct_graph(img, mask, bgGMM, fgGMM)
 
     return min_cut, energy
 
