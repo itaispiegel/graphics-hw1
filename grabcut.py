@@ -37,12 +37,14 @@ class Component:
         self.covariance_matrix_inverse = np.linalg.inv(self.covariance_matrix)
         self.weight = len(data_points) / total_points_count
 
-    def pdf(self, x):
-        d = self.mean.shape[0]
+    def calc_scores(self, X):
+        d = X.shape[1]
+        diff = X - self.mean
         norm = np.sqrt((2 * np.pi) ** d * self.covariance_matrix_det)
-        exponent = (
-            -0.5 * (x - self.mean).T @ self.covariance_matrix_inverse @ (x - self.mean)
+        exponent = -0.5 * np.einsum(
+            "ij, ij->i", diff, np.dot(self.covariance_matrix_inverse, diff.T).T
         )
+
         return (1 / norm) * np.exp(exponent)
 
 
@@ -76,23 +78,18 @@ class GaussianMixture:
         return np.array([c.weight for c in self.components])
 
     @require_initialization
-    def scores(self, point):
-        scores = np.vectorize(lambda f: f(point))([c.pdf for c in self.components])
-        return scores
+    def calc_probs(self, X):
+        probs = [c.calc_scores(X) for c in self.components]
+        return np.dot(self.weights, probs)
 
     @require_initialization
-    def calc_prob(self, x):
-        scores = self.scores(x)
-        return np.dot(self.weights, scores)
-
-    @require_initialization
-    def assign_point_to_component(self, x):
-        scores = self.scores(x)
-        return np.argmax(scores)
+    def assign_points_to_components(self, X):
+        probs = np.array([c.calc_scores(X) for c in self.components]).T
+        return np.argmax(probs, axis=1)
 
     @require_initialization
     def update(self, X):
-        labels = np.apply_along_axis(self.assign_point_to_component, axis=1, arr=X)
+        labels = self.assign_points_to_components(X)
         updated_components = []
         for i in range(self.n_components):
             assigned_pixels = X[np.where(labels == i)]
@@ -112,23 +109,34 @@ def t_link_edges_and_capacities(img, mask, bgGMM, fgGMM):
     src_vertex = rows * cols
     sink_vertex = src_vertex + 1
 
-    t_link_edges, t_link_capacities = [], []
-    for y in range(rows):
-        for x in range(cols):
-            vtx_id = y * rows + x
-            color = img[y, x]
-            mask_val = mask[y, x]
-            if mask_val in (GC_PR_BGD, GC_PR_FGD):
-                from_source = -np.log(bgGMM.calc_prob(color))
-                to_sink = -np.log(fgGMM.calc_prob(color))
-            elif mask_val == GC_BGD:
-                from_source = 0
-                to_sink = LAMBDA
-            else:  # GC_FGD
-                from_source = LAMBDA
-                to_sink = 0
-            t_link_edges.extend([(src_vertex, vtx_id), (vtx_id, sink_vertex)])
-            t_link_capacities.extend([from_source, to_sink])
+    flat_mask = mask.reshape(-1)
+    pr_pixels_idxs = np.where(
+        np.logical_or(flat_mask == GC_PR_BGD, flat_mask == GC_PR_FGD)
+    )[0]
+    bgd_pixels_idxs = np.where(flat_mask == GC_BGD)[0]
+    fgd_pixels_idxs = np.where(flat_mask == GC_FGD)[0]
+
+    pr_bgd_pixels = img[mask == GC_PR_BGD]
+    pr_fgd_pixels = img[mask == GC_PR_FGD]
+
+    t_link_edges = itertools.chain(
+        zip(itertools.repeat(src_vertex, pr_pixels_idxs.size), pr_pixels_idxs),
+        zip(pr_pixels_idxs, itertools.repeat(sink_vertex, pr_pixels_idxs.size)),
+        zip(itertools.repeat(src_vertex, bgd_pixels_idxs.size), bgd_pixels_idxs),
+        zip(bgd_pixels_idxs, itertools.repeat(sink_vertex, bgd_pixels_idxs.size)),
+        zip(itertools.repeat(src_vertex, fgd_pixels_idxs.size), fgd_pixels_idxs),
+        zip(fgd_pixels_idxs, itertools.repeat(sink_vertex, fgd_pixels_idxs.size)),
+    )
+
+    t_link_capacities = itertools.chain(
+        -np.log(bgGMM.calc_probs(pr_bgd_pixels)),
+        -np.log(bgGMM.calc_probs(pr_fgd_pixels)),
+        itertools.repeat(0, bgd_pixels_idxs.size),
+        itertools.repeat(LAMBDA, bgd_pixels_idxs.size),
+        itertools.repeat(LAMBDA, fgd_pixels_idxs.size),
+        itertools.repeat(0, fgd_pixels_idxs.size),
+    )
+
     return t_link_edges, t_link_capacities
 
 
