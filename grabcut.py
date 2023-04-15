@@ -1,6 +1,5 @@
 import argparse
 import itertools
-from functools import cache
 
 import cv2
 import igraph as ig
@@ -11,6 +10,13 @@ GC_BGD = 0  # Hard bg pixel
 GC_FGD = 1  # Hard fg pixel, will not be used
 GC_PR_BGD = 2  # Soft bg pixel
 GC_PR_FGD = 3  # Soft fg pixel
+
+GAMMA = 50
+LAMBDA = 9 * GAMMA
+
+beta = None
+n_link_edges = None
+n_link_capacities = None
 
 
 def require_initialization(func):
@@ -25,9 +31,7 @@ def require_initialization(func):
 class Component:
     def __init__(self, data_points, total_points_count, mean=None):
         self.data_points = data_points
-        self.mean = mean
-        if self.mean is None:
-            self.mean = np.mean(data_points, axis=0)
+        self.mean = mean if mean is not None else np.mean(data_points, axis=0)
         self.covariance_matrix = np.cov(self.data_points, rowvar=False)
         self.covariance_matrix_det = np.linalg.det(self.covariance_matrix)
         self.covariance_matrix_inverse = np.linalg.inv(self.covariance_matrix)
@@ -66,22 +70,35 @@ class GaussianMixture:
 
         return self
 
-    def assign_point_to_component(self, point):
-        scores = [component.pdf(point) for component in self.components]
+    @property
+    @require_initialization
+    def weights(self):
+        return np.array([c.weight for c in self.components])
+
+    @require_initialization
+    def scores(self, point):
+        scores = np.vectorize(lambda f: f(point))([c.pdf for c in self.components])
+        return scores
+
+    @require_initialization
+    def calc_prob(self, x):
+        scores = self.scores(x)
+        return np.dot(self.weights, scores)
+
+    @require_initialization
+    def assign_point_to_component(self, x):
+        scores = self.scores(x)
         return np.argmax(scores)
 
+    @require_initialization
     def update(self, X):
-        labels = np.fromiter((self.assign_point_to_component(x) for x in X), dtype=int)
+        labels = np.apply_along_axis(self.assign_point_to_component, axis=1, arr=X)
         updated_components = []
         for i in range(self.n_components):
-            component = Component(X[np.where(labels == i)], len(X))
+            assigned_pixels = X[np.where(labels == i)]
+            component = Component(assigned_pixels, total_points_count=len(X))
             updated_components.append(component)
         self.components = updated_components
-
-    def calc_prob(self, X):
-        prob = [c.pdf(x) for x in X for c in self.components]
-        weights = [c.weight for c in self.components]
-        return np.dot(weights, prob)
 
 
 def partition_pixels(img, mask):
@@ -90,67 +107,36 @@ def partition_pixels(img, mask):
     return bg_pixels, fg_pixels
 
 
-def partition_pixels_indexes(img, mask):
-    flattened_mask = mask.reshape(-1)
-    bgd_idxs = np.where(flattened_mask == GC_BGD)[0]
-    fgd_idxs = np.where(flattened_mask == GC_FGD)[0]
-    pr_bgd_idxs = np.where(flattened_mask == GC_PR_BGD)[0]
-    pr_fgd_idxs = np.where(flattened_mask == GC_PR_FGD)[0]
-    return bgd_idxs, fgd_idxs, pr_bgd_idxs, pr_fgd_idxs
-
-
 def t_link_edges_and_capacities(img, mask, bgGMM, fgGMM):
-    bgd_idxs, fgd_idxs, pr_bgd_idxs, pr_fgd_idxs = partition_pixels_indexes(img, mask)
-    unk_idxs = np.concatenate((pr_bgd_idxs, pr_fgd_idxs))
     rows, cols, _ = img.shape
     src_vertex = rows * cols
     sink_vertex = src_vertex + 1
 
-    src_to_unk_edges = zip([src_vertex] * len(unk_idxs), unk_idxs)
-    unk_to_sink_edges = zip(unk_idxs, [sink_vertex] * len(unk_idxs))
-    src_to_bgd_edges = zip([src_vertex] * len(bgd_idxs), bgd_idxs)
-    bgd_to_sink = zip(bgd_idxs, [sink_vertex] * len(bgd_idxs))
-    src_to_fgd_edges = zip([src_vertex] * len(fgd_idxs), fgd_idxs)
-    fgd_to_sink_edges = zip(fgd_idxs, [sink_vertex] * len(fgd_idxs))
-
-    src_to_unk_capacities = -np.log(
-        bgGMM.calc_prob(img.reshape(-1, 3)[unk_idxs])
-    )  # FIXME
-    unk_to_sink_capcities = -np.log(
-        bgGMM.calc_prob(img.reshape(-1, 3)[unk_idxs])
-    )  # FIXME
-    src_to_bgd_capacities = itertools.repeat(0, bgd_idxs.size)
-    bgd_to_sink_capacities = itertools.repeat(
-        bgGMM.n_components, bgd_idxs.size
-    )  # FIXME Is this the right value?
-    src_to_fgd_capacities = itertools.repeat(
-        fgGMM.n_components, fgd_idxs.size
-    )  # FIXME Is this the right value?
-    fgd_to_sink_capacities = itertools.repeat(0, fgd_idxs.size)
-
-    t_link_edges = itertools.chain(
-        src_to_unk_edges,
-        unk_to_sink_edges,
-        src_to_bgd_edges,
-        bgd_to_sink,
-        src_to_fgd_edges,
-        fgd_to_sink_edges,
-    )
-
-    t_link_capacities = itertools.chain(
-        src_to_unk_capacities,
-        unk_to_sink_capcities,
-        src_to_bgd_capacities,
-        bgd_to_sink_capacities,
-        src_to_fgd_capacities,
-        fgd_to_sink_capacities,
-    )
-
+    t_link_edges, t_link_capacities = [], []
+    for y in range(rows):
+        for x in range(cols):
+            vtx_id = y * rows + x
+            color = img[y, x]
+            mask_val = mask[y, x]
+            if mask_val in (GC_PR_BGD, GC_PR_FGD):
+                from_source = -np.log(bgGMM.calc_prob(color))
+                to_sink = -np.log(fgGMM.calc_prob(color))
+            elif mask_val == GC_BGD:
+                from_source = 0
+                to_sink = LAMBDA
+            else:  # GC_FGD
+                from_source = LAMBDA
+                to_sink = 0
+            t_link_edges.extend([(src_vertex, vtx_id), (vtx_id, sink_vertex)])
+            t_link_capacities.extend([from_source, to_sink])
     return t_link_edges, t_link_capacities
 
 
-@cache
 def calculate_beta(img):
+    global beta
+    if beta is not None:
+        return beta
+
     beta = 0
     rows, cols, _ = img.shape
     for y in range(rows):
@@ -171,9 +157,11 @@ def calculate_beta(img):
     return 1.0 / (2 * beta / (4 * cols * rows - 3 * cols - 3 * rows + 2))
 
 
-@cache
-def n_link_edges_and_capcities(img):
-    gamma = 50
+def n_link_edges_and_capacities(img):
+    global n_link_edges, n_link_capacities
+    if n_link_edges is not None and n_link_capacities is not None:
+        return n_link_edges, n_link_capacities
+
     beta = calculate_beta(img)
     (
         img_without_left_col,
@@ -201,13 +189,13 @@ def n_link_edges_and_capcities(img):
     upright_diff = (
         img_without_right_col_and_top_row - img_without_left_col_and_bottom_row
     )
-    left_V = gamma * np.exp(-beta * np.sum(np.square(left_diff), axis=2))
+    left_V = GAMMA * np.exp(-beta * np.sum(np.square(left_diff), axis=2))
     upleft_V = (
-        gamma / np.sqrt(2) * np.exp(-beta * np.sum(np.square(upleft_diff), axis=2))
+        GAMMA / np.sqrt(2) * np.exp(-beta * np.sum(np.square(upleft_diff), axis=2))
     )
-    up_V = gamma * np.exp(-beta * np.sum(np.square(up_diff), axis=2))
+    up_V = GAMMA * np.exp(-beta * np.sum(np.square(up_diff), axis=2))
     upright_V = (
-        gamma / np.sqrt(2) * np.exp(-beta * np.sum(np.square(upright_diff), axis=2))
+        GAMMA / np.sqrt(2) * np.exp(-beta * np.sum(np.square(upright_diff), axis=2))
     )
 
     n_link_edges = itertools.chain(
@@ -240,8 +228,7 @@ def construct_graph(img, mask, bgGMM, fgGMM):
     t_link_edges, t_link_capacities = t_link_edges_and_capacities(
         img, mask, bgGMM, fgGMM
     )
-    n_link_edges, n_link_capacities = n_link_edges_and_capcities(img)
-
+    n_link_edges, n_link_capacities = n_link_edges_and_capacities(img)
     edges = itertools.chain(t_link_edges, n_link_edges)
     capacities = itertools.chain(t_link_capacities, n_link_capacities)
     graph = ig.Graph(n=rows * cols + 2, edges=edges)
@@ -301,12 +288,21 @@ def calculate_mincut(img, mask, bgGMM, fgGMM):
     energy = 0
 
     graph = construct_graph(img, mask, bgGMM, fgGMM)
+    src, sink = graph.vcount() - 2, graph.vcount() - 1
+    ig_mincut = graph.mincut(src, sink)
+    min_cut = ig_mincut.partition
 
     return min_cut, energy
 
 
 def update_mask(mincut_sets, mask):
     # TODO: implement mask update step
+    flat_mask = mask.reshape(-1)
+    pr_idxs = np.where(np.logical_or(flat_mask == GC_PR_BGD, flat_mask == GC_PR_FGD))
+
+    flat_mask[pr_idxs] = np.where(
+        np.isin(pr_idxs, mincut_sets[0]), GC_PR_FGD, GC_PR_BGD
+    )
     return mask
 
 
