@@ -18,6 +18,8 @@ beta = None
 n_link_edges = None
 n_link_capacities = None
 
+previous_energy = None
+
 
 def require_initialization(func):
     def wrapper(self, *args, **kwargs):
@@ -42,7 +44,7 @@ class Component:
         diff = X - self.mean
         norm = np.sqrt((2 * np.pi) ** d * self.covariance_matrix_det)
         exponent = -0.5 * np.einsum(
-            "ij, ij->i", diff, np.dot(self.covariance_matrix_inverse, diff.T).T
+            "ij, ij->i", diff, diff @ self.covariance_matrix_inverse.T
         )
 
         return (1 / norm) * np.exp(exponent)
@@ -110,14 +112,14 @@ def t_link_edges_and_capacities(img, mask, bgGMM, fgGMM):
     sink_vertex = src_vertex + 1
 
     flat_mask = mask.reshape(-1)
+    flat_img = img.reshape(-1, 3)
     pr_pixels_idxs = np.where(
         np.logical_or(flat_mask == GC_PR_BGD, flat_mask == GC_PR_FGD)
     )[0]
     bgd_pixels_idxs = np.where(flat_mask == GC_BGD)[0]
     fgd_pixels_idxs = np.where(flat_mask == GC_FGD)[0]
 
-    pr_bgd_pixels = img[mask == GC_PR_BGD]
-    pr_fgd_pixels = img[mask == GC_PR_FGD]
+    pr_pixels = flat_img[pr_pixels_idxs]
 
     t_link_edges = itertools.chain(
         zip(itertools.repeat(src_vertex, pr_pixels_idxs.size), pr_pixels_idxs),
@@ -129,8 +131,8 @@ def t_link_edges_and_capacities(img, mask, bgGMM, fgGMM):
     )
 
     t_link_capacities = itertools.chain(
-        -np.log(bgGMM.calc_probs(pr_bgd_pixels)),
-        -np.log(bgGMM.calc_probs(pr_fgd_pixels)),
+        -np.log(bgGMM.calc_probs(pr_pixels)),
+        -np.log(fgGMM.calc_probs(pr_pixels)),
         itertools.repeat(0, bgd_pixels_idxs.size),
         itertools.repeat(LAMBDA, bgd_pixels_idxs.size),
         itertools.repeat(LAMBDA, fgd_pixels_idxs.size),
@@ -171,32 +173,11 @@ def n_link_edges_and_capacities(img):
         return n_link_edges, n_link_capacities
 
     beta = calculate_beta(img)
-    (
-        img_without_left_col,
-        img_without_right_col,
-        img_without_left_col_and_top_row,
-        img_without_right_col_and_right_row,
-        img_without_top_row,
-        img_without_bottom_row,
-        img_without_right_col_and_top_row,
-        img_without_left_col_and_bottom_row,
-    ) = (
-        img[:, 1:],
-        img[:, :-1],
-        img[1:, 1:],
-        img[:-1, :-1],
-        img[1:, :],
-        img[:-1, :],
-        img[1:, :-1],
-        img[:-1, 1:],
-    )
+    left_diff = img[:, 1:] - img[:, :-1]
+    upleft_diff = img[1:, 1:] - img[:-1, :-1]
+    up_diff = img[1:, :] - img[:-1, :]
+    upright_diff = img[1:, :-1] - img[:-1, 1:]
 
-    left_diff = img_without_left_col - img_without_right_col
-    upleft_diff = img_without_left_col_and_top_row - img_without_right_col_and_right_row
-    up_diff = img_without_top_row - img_without_bottom_row
-    upright_diff = (
-        img_without_right_col_and_top_row - img_without_left_col_and_bottom_row
-    )
     left_V = GAMMA * np.exp(-beta * np.sum(np.square(left_diff), axis=2))
     upleft_V = (
         GAMMA / np.sqrt(2) * np.exp(-beta * np.sum(np.square(upleft_diff), axis=2))
@@ -206,17 +187,21 @@ def n_link_edges_and_capacities(img):
         GAMMA / np.sqrt(2) * np.exp(-beta * np.sum(np.square(upright_diff), axis=2))
     )
 
-    n_link_edges = itertools.chain(
-        zip(img_without_left_col.reshape(-1), img_without_right_col.reshape(-1)),
-        zip(
-            img_without_left_col_and_top_row.reshape(-1),
-            img_without_right_col_and_right_row.reshape(-1),
-        ),
-        zip(img_without_top_row.reshape(-1), img_without_bottom_row.reshape(-1)),
-        zip(
-            img_without_right_col_and_top_row.reshape(-1),
-            img_without_left_col_and_bottom_row.reshape(-1),
-        ),
+    rows, cols, _ = img.shape
+    img_idxs = np.arange(rows * cols, dtype=np.uint32).reshape(rows, cols)
+    n_link_edges = list(
+        itertools.chain(
+            zip(img_idxs[:, 1:].reshape(-1), img_idxs[:, :-1].reshape(-1)),
+            zip(
+                img_idxs[1:, 1:].reshape(-1),
+                img_idxs[:-1, :-1].reshape(-1),
+            ),
+            zip(img_idxs[1:, :].reshape(-1), img_idxs[:-1, :].reshape(-1)),
+            zip(
+                img_idxs[1:, :-1].reshape(-1),
+                img_idxs[:-1, 1:].reshape(-1),
+            ),
+        )
     )
 
     n_link_capacities = np.concatenate(
@@ -239,8 +224,8 @@ def construct_graph(img, mask, bgGMM, fgGMM):
     n_link_edges, n_link_capacities = n_link_edges_and_capacities(img)
     edges = itertools.chain(t_link_edges, n_link_edges)
     capacities = itertools.chain(t_link_capacities, n_link_capacities)
-    graph = ig.Graph(n=rows * cols + 2, edges=edges)
-    graph.es["capacity"] = capacities
+    graph = ig.Graph(n=rows * cols + 2, edges=edges, directed=True)
+    graph.es["capacity"] = list(capacities)
     return graph
 
 
@@ -250,6 +235,11 @@ def grabcut(img, rect, n_iter=5):
     mask = np.zeros(img.shape[:2], dtype=np.uint8)
     mask.fill(GC_BGD)
     x, y, w, h = rect
+
+    # Required patch
+    # https://moodle.tau.ac.il/mod/forum/discuss.php?d=71803#p100498
+    w -= x
+    h -= y
 
     # Initalize the inner square to Foreground
     mask[y : y + h, x : x + w] = GC_PR_FGD
@@ -297,9 +287,8 @@ def calculate_mincut(img, mask, bgGMM, fgGMM):
 
     graph = construct_graph(img, mask, bgGMM, fgGMM)
     src, sink = graph.vcount() - 2, graph.vcount() - 1
-    ig_mincut = graph.mincut(src, sink)
-    min_cut = ig_mincut.partition
-
+    ig_mincut = graph.st_mincut(src, sink, capacity="capacity")
+    min_cut, energy = ig_mincut.partition, ig_mincut.value
     return min_cut, energy
 
 
@@ -316,14 +305,27 @@ def update_mask(mincut_sets, mask):
 
 def check_convergence(energy):
     # TODO: implement convergence check
-    convergence = False
+    global previous_energy
+    convergence = (
+        False if previous_energy is None else (previous_energy - energy) < 0.001
+    )
+    previous_energy = energy
     return convergence
 
 
 def cal_metric(predicted_mask, gt_mask):
     # TODO: implement metric calculation
+    copied_mask = predicted_mask.copy()
+    copied_mask[np.where(copied_mask == GC_PR_BGD)] = GC_BGD
+    copied_mask[np.where(copied_mask == GC_PR_FGD)] = GC_FGD
 
-    return 100, 100
+    accuracy = np.count_nonzero(copied_mask == gt_mask) / copied_mask.size
+
+    intersection = np.logical_and(copied_mask, gt_mask)
+    union = np.logical_or(copied_mask, gt_mask)
+    jaccard = intersection.sum() / union.sum()
+
+    return accuracy, jaccard
 
 
 def parse():
