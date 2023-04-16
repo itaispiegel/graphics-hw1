@@ -31,16 +31,17 @@ class Component:
         self.covariance_matrix_det = np.linalg.det(self.covariance_matrix)
         self.covariance_matrix_inverse = np.linalg.inv(self.covariance_matrix)
         self.weight = len(data_points) / total_points_count
+        self.k = self.mean.shape[0]
 
     def calc_scores(self, X):
-        d = X.shape[1]
         diff = X - self.mean
-        norm = np.sqrt((2 * np.pi) ** d * self.covariance_matrix_det)
-        exponent = -0.5 * np.einsum(
-            "ij, ij->i", diff, diff @ self.covariance_matrix_inverse.T
+        exponent = np.einsum(
+            "ij, ij->i", -0.5 * diff, diff @ self.covariance_matrix_inverse.T
         )
 
-        return (1 / norm) * np.exp(exponent)
+        return (
+            1 / np.sqrt((2 * np.pi) ** self.k * self.covariance_matrix_det)
+        ) * np.exp(exponent)
 
 
 class GaussianMixture:
@@ -107,8 +108,9 @@ class GrabcutGraph:
         self.sink = pixels_count + 1
         self.edges = edges
         self.capacities = capacities
-        self._graph = ig.Graph(n=self.n, edges=edges, directed=True)
-        self._graph.es["capacity"] = list(capacities)
+        self._graph = ig.Graph(
+            n=self.n, edges=edges, directed=True, edge_attrs=dict(capacity=capacities)
+        )
 
     def mincut(self):
         mincut = self._graph.st_mincut(self.src, self.sink, capacity="capacity")
@@ -121,8 +123,8 @@ class GrabcutGraph:
             img, mask, bgGMM, fgGMM
         )
         n_link_edges, n_link_capacities = cls.n_link_edges_and_capacities(img)
-        edges = itertools.chain(t_link_edges, n_link_edges)
-        capacities = itertools.chain(t_link_capacities, n_link_capacities)
+        edges = list(itertools.chain(t_link_edges, n_link_edges))
+        capacities = list(itertools.chain(t_link_capacities, n_link_capacities))
         return cls(rows * cols, edges, capacities)
 
     @classmethod
