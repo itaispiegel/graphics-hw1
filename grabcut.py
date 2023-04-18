@@ -62,7 +62,7 @@ class GaussianMixture:
         self.components = []
         for i in range(self.n_components):
             component = Component(
-                X[np.where(labels == i)], len(X), mean=self._kmeans.cluster_centers_[i]
+                X[labels == i], len(X), mean=self._kmeans.cluster_centers_[i]
             )
             self.components.append(component)
 
@@ -86,12 +86,9 @@ class GaussianMixture:
     @require_initialization
     def update(self, X):
         labels = self.assign_points_to_components(X)
-        updated_components = []
         for i in range(self.n_components):
-            assigned_pixels = X[np.where(labels == i)]
-            component = Component(assigned_pixels, total_points_count=len(X))
-            updated_components.append(component)
-        self.components = updated_components
+            assigned_pixels = X[labels == i]
+            self.components[i] = Component(assigned_pixels, total_points_count=len(X))
 
 
 class GrabcutGraph:
@@ -132,7 +129,7 @@ class GrabcutGraph:
         if cls._beta is not None:
             return cls._beta
 
-        cls._beta = 0
+        cls._beta = 0.0
         rows, cols, _ = img.shape
         for y in range(rows):
             for x in range(cols):
@@ -149,7 +146,8 @@ class GrabcutGraph:
                 if y > 0 and x < cols - 1:
                     diff = color - img[y - 1, x + 1]
                     cls._beta += diff.dot(diff)
-        return 1.0 / (2 * cls._beta / (4 * cols * rows - 3 * cols - 3 * rows + 2))
+        cls._beta = 1.0 / (2 * cls._beta / (4 * cols * rows - 3 * cols - 3 * rows + 2))
+        return cls._beta
 
     @classmethod
     def t_link_edges_and_capacities(cls, img, mask, bgGMM, fgGMM):
@@ -169,11 +167,11 @@ class GrabcutGraph:
 
         t_link_edges = itertools.chain(
             zip(itertools.repeat(src_vertex, pr_pixels_idxs.size), pr_pixels_idxs),
-            zip(pr_pixels_idxs, itertools.repeat(sink_vertex, pr_pixels_idxs.size)),
+            zip(itertools.repeat(sink_vertex, pr_pixels_idxs.size), pr_pixels_idxs),
             zip(itertools.repeat(src_vertex, bgd_pixels_idxs.size), bgd_pixels_idxs),
-            zip(bgd_pixels_idxs, itertools.repeat(sink_vertex, bgd_pixels_idxs.size)),
+            zip(itertools.repeat(sink_vertex, bgd_pixels_idxs.size), bgd_pixels_idxs),
             zip(itertools.repeat(src_vertex, fgd_pixels_idxs.size), fgd_pixels_idxs),
-            zip(fgd_pixels_idxs, itertools.repeat(sink_vertex, fgd_pixels_idxs.size)),
+            zip(itertools.repeat(sink_vertex, fgd_pixels_idxs.size), fgd_pixels_idxs),
         )
 
         t_link_capacities = itertools.chain(
@@ -327,8 +325,8 @@ def check_convergence(energy):
 def cal_metric(predicted_mask, gt_mask):
     # TODO: implement metric calculation
     copied_mask = predicted_mask.copy()
-    copied_mask[np.where(copied_mask == GC_PR_BGD)] = GC_BGD
-    copied_mask[np.where(copied_mask == GC_PR_FGD)] = GC_FGD
+    copied_mask[copied_mask == GC_PR_BGD] = GC_BGD
+    copied_mask[copied_mask == GC_PR_FGD] = GC_FGD
 
     accuracy = np.count_nonzero(copied_mask == gt_mask) / copied_mask.size
 
