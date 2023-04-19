@@ -11,6 +11,8 @@ GC_FGD = 1  # Hard fg pixel, will not be used
 GC_PR_BGD = 2  # Soft bg pixel
 GC_PR_FGD = 3  # Soft fg pixel
 
+EPSILON = np.finfo(np.float64).eps
+
 previous_energy = None
 
 
@@ -27,7 +29,10 @@ class Component:
     def __init__(self, data_points, total_points_count, mean=None):
         self.data_points = data_points
         self.mean = mean if mean is not None else np.mean(data_points, axis=0)
-        self.covariance_matrix = np.cov(self.data_points, rowvar=False)
+        # Avoid singular matrix by adding epsilon on the diagonal
+        self.covariance_matrix = np.cov(
+            self.data_points, rowvar=False
+        ) + EPSILON * np.eye(3)
         self.covariance_matrix_det = np.linalg.det(self.covariance_matrix)
         self.covariance_matrix_inverse = np.linalg.inv(self.covariance_matrix)
         self.weight = len(data_points) / total_points_count
@@ -75,7 +80,9 @@ class GaussianMixture:
 
     @require_initialization
     def calc_probs(self, X):
-        probs = [c.calc_scores(X) for c in self.components]
+        probs = (
+            np.array([c.calc_scores(X) for c in self.components]) + EPSILON
+        )  # Add epsilon to avoid zero
         return np.dot(self.weights, probs)
 
     @require_initialization
@@ -93,7 +100,7 @@ class GaussianMixture:
 
 class GrabcutGraph:
     GAMMA = 50
-    LAMBDA = 9 * GAMMA
+    K = GAMMA * 9
 
     _beta = None
     _n_link_edges = None
@@ -106,22 +113,25 @@ class GrabcutGraph:
         self.edges = edges
         self.capacities = capacities
         self._graph = ig.Graph(
-            n=self.n, edges=edges, directed=True, edge_attrs=dict(capacity=capacities)
+            n=self.n, edges=edges, edge_attrs=dict(capacity=capacities)
         )
 
     def mincut(self):
         mincut = self._graph.st_mincut(self.src, self.sink, capacity="capacity")
-        return mincut.partition, mincut.value
+        mincut_sets = mincut.partition
+        mincut_sets[0].remove(self.src)
+        mincut_sets[1].remove(self.sink)
+        return mincut_sets, mincut.value
 
     @classmethod
     def construct_graph(cls, img, mask, bgGMM, fgGMM):
         rows, cols, _ = img.shape
+        n_link_edges, n_link_capacities = cls.n_link_edges_and_capacities(img)
         t_link_edges, t_link_capacities = cls.t_link_edges_and_capacities(
             img, mask, bgGMM, fgGMM
         )
-        n_link_edges, n_link_capacities = cls.n_link_edges_and_capacities(img)
-        edges = list(itertools.chain(t_link_edges, n_link_edges))
-        capacities = list(itertools.chain(t_link_capacities, n_link_capacities))
+        edges = np.concatenate([t_link_edges, n_link_edges])
+        capacities = np.concatenate([t_link_capacities, n_link_capacities])
         return cls(rows * cols, edges, capacities)
 
     @classmethod
@@ -150,6 +160,55 @@ class GrabcutGraph:
         return cls._beta
 
     @classmethod
+    def n_link_edges_and_capacities(cls, img):
+        if cls._n_link_edges is not None and cls._n_link_capacities is not None:
+            return cls._n_link_edges, cls._n_link_capacities
+
+        rows, cols, _ = img.shape
+        img_idxs = np.arange(rows * cols, dtype=np.uint32).reshape(rows, cols)
+        beta = cls.beta(img)
+
+        left_edges = np.c_[img_idxs[:, 1:].reshape(-1), img_idxs[:, :-1].reshape(-1)]
+        up_edges = np.c_[img_idxs[1:, :].reshape(-1), img_idxs[:-1, :].reshape(-1)]
+        upleft_edges = np.c_[
+            img_idxs[1:, 1:].reshape(-1), img_idxs[:-1, :-1].reshape(-1)
+        ]
+        upright_edges = np.c_[
+            img_idxs[1:, :-1].reshape(-1), img_idxs[:-1, 1:].reshape(-1)
+        ]
+
+        straight_edges = np.concatenate([left_edges, up_edges])
+        diagonal_edges = np.concatenate([upleft_edges, upright_edges])
+
+        left_diffs = img[:, 1:] - img[:, :-1]
+        up_diffs = img[1:, :] - img[:-1, :]
+        upleft_diffs = img[1:, 1:] - img[:-1, :-1]
+        upright_diffs = img[1:, :-1] - img[:-1, 1:]
+
+        straight_diffs = np.concatenate(
+            [
+                np.linalg.norm(left_diffs, 2, axis=2).flatten(),
+                np.linalg.norm(up_diffs, 2, axis=2).flatten(),
+            ]
+        )
+        diagonal_diffs = np.concatenate(
+            [
+                np.linalg.norm(upleft_diffs, 2, axis=2).flatten(),
+                np.linalg.norm(upright_diffs, 2, axis=2).flatten(),
+            ]
+        )
+
+        straight_capacities = cls.GAMMA * np.exp(-beta * np.square(straight_diffs))
+        diagonal_capacities = cls.GAMMA * np.exp(-beta * np.square(diagonal_diffs))
+
+        cls._n_link_edges = np.concatenate([straight_edges, diagonal_edges])
+        cls._n_link_capacities = np.concatenate(
+            [straight_capacities, diagonal_capacities]
+        )
+
+        return cls._n_link_edges, cls._n_link_capacities
+
+    @classmethod
     def t_link_edges_and_capacities(cls, img, mask, bgGMM, fgGMM):
         rows, cols, _ = img.shape
         src_vertex = rows * cols
@@ -165,77 +224,51 @@ class GrabcutGraph:
 
         pr_pixels = flat_img[pr_pixels_idxs]
 
-        t_link_edges = itertools.chain(
-            zip(itertools.repeat(src_vertex, pr_pixels_idxs.size), pr_pixels_idxs),
-            zip(itertools.repeat(sink_vertex, pr_pixels_idxs.size), pr_pixels_idxs),
-            zip(itertools.repeat(src_vertex, bgd_pixels_idxs.size), bgd_pixels_idxs),
-            zip(itertools.repeat(sink_vertex, bgd_pixels_idxs.size), bgd_pixels_idxs),
-            zip(itertools.repeat(src_vertex, fgd_pixels_idxs.size), fgd_pixels_idxs),
-            zip(itertools.repeat(sink_vertex, fgd_pixels_idxs.size), fgd_pixels_idxs),
+        pr_src_edges = np.c_[np.full(pr_pixels_idxs.size, src_vertex), pr_pixels_idxs]
+        pr_sink_edges = np.c_[np.full(pr_pixels_idxs.size, sink_vertex), pr_pixels_idxs]
+        bgd_src_edges = np.c_[
+            np.full(bgd_pixels_idxs.size, src_vertex), bgd_pixels_idxs
+        ]
+        bgd_sink_edges = np.c_[
+            np.full(bgd_pixels_idxs.size, sink_vertex), bgd_pixels_idxs
+        ]
+        fgd_src_edges = np.c_[
+            np.full(fgd_pixels_idxs.size, src_vertex), fgd_pixels_idxs
+        ]
+        fgd_sink_edges = np.c_[
+            np.full(fgd_pixels_idxs.size, sink_vertex), fgd_pixels_idxs
+        ]
+
+        t_link_edges = np.concatenate(
+            [
+                pr_src_edges,
+                pr_sink_edges,
+                bgd_src_edges,
+                bgd_sink_edges,
+                fgd_src_edges,
+                fgd_sink_edges,
+            ]
         )
 
-        t_link_capacities = itertools.chain(
-            -np.log(bgGMM.calc_probs(pr_pixels)),
-            -np.log(fgGMM.calc_probs(pr_pixels)),
-            itertools.repeat(0, bgd_pixels_idxs.size),
-            itertools.repeat(cls.LAMBDA, bgd_pixels_idxs.size),
-            itertools.repeat(cls.LAMBDA, fgd_pixels_idxs.size),
-            itertools.repeat(0, fgd_pixels_idxs.size),
+        pr_src_capacities = -np.log(bgGMM.calc_probs(pr_pixels))
+        pr_sink_capacities = -np.log(fgGMM.calc_probs(pr_pixels))
+        bgd_src_capacities = np.full(bgd_pixels_idxs.size, 0)
+        bgd_sink_capacities = np.full(bgd_pixels_idxs.size, cls.K)
+        fgd_src_capacities = np.full(fgd_pixels_idxs.size, cls.K)
+        fgd_sink_capacities = np.full(fgd_pixels_idxs.size, 0)
+
+        t_link_capacities = np.concatenate(
+            [
+                pr_src_capacities,
+                pr_sink_capacities,
+                bgd_src_capacities,
+                bgd_sink_capacities,
+                fgd_src_capacities,
+                fgd_sink_capacities,
+            ]
         )
 
         return t_link_edges, t_link_capacities
-
-    @classmethod
-    def n_link_edges_and_capacities(cls, img):
-        if cls._n_link_edges is not None and cls._n_link_capacities is not None:
-            return cls._n_link_edges, cls._n_link_capacities
-
-        beta = cls.beta(img)
-        left_diff = img[:, 1:] - img[:, :-1]
-        upleft_diff = img[1:, 1:] - img[:-1, :-1]
-        up_diff = img[1:, :] - img[:-1, :]
-        upright_diff = img[1:, :-1] - img[:-1, 1:]
-
-        left_V = cls.GAMMA * np.exp(-beta * np.sum(np.square(left_diff), axis=2))
-        upleft_V = (
-            cls.GAMMA
-            / np.sqrt(2)
-            * np.exp(-beta * np.sum(np.square(upleft_diff), axis=2))
-        )
-        up_V = cls.GAMMA * np.exp(-beta * np.sum(np.square(up_diff), axis=2))
-        upright_V = (
-            cls.GAMMA
-            / np.sqrt(2)
-            * np.exp(-beta * np.sum(np.square(upright_diff), axis=2))
-        )
-
-        rows, cols, _ = img.shape
-        img_idxs = np.arange(rows * cols, dtype=np.uint32).reshape(rows, cols)
-        cls._n_link_edges = list(
-            itertools.chain(
-                zip(img_idxs[:, 1:].reshape(-1), img_idxs[:, :-1].reshape(-1)),
-                zip(
-                    img_idxs[1:, 1:].reshape(-1),
-                    img_idxs[:-1, :-1].reshape(-1),
-                ),
-                zip(img_idxs[1:, :].reshape(-1), img_idxs[:-1, :].reshape(-1)),
-                zip(
-                    img_idxs[1:, :-1].reshape(-1),
-                    img_idxs[:-1, 1:].reshape(-1),
-                ),
-            )
-        )
-
-        cls._n_link_capacities = np.concatenate(
-            (
-                left_V.reshape(-1),
-                upleft_V.reshape(-1),
-                up_V.reshape(-1),
-                upright_V.reshape(-1),
-            )
-        )
-
-        return cls._n_link_edges, cls._n_link_capacities
 
 
 def partition_pixels(img, mask):
@@ -262,8 +295,7 @@ def grabcut(img, rect, n_iter=5):
 
     bgGMM, fgGMM = initalize_GMMs(img, mask)
 
-    num_iters = 1000
-    for i in range(num_iters):
+    for i in range(n_iter):
         # Update GMM
         bgGMM, fgGMM = update_GMMs(img, mask, bgGMM, fgGMM)
 
@@ -303,20 +335,18 @@ def calculate_mincut(img, mask, bgGMM, fgGMM):
 
 def update_mask(mincut_sets, mask):
     # TODO: implement mask update step
-    flat_mask = mask.reshape(-1)
-    pr_idxs = np.where(np.logical_or(flat_mask == GC_PR_BGD, flat_mask == GC_PR_FGD))[0]
-
-    flat_mask[pr_idxs] = np.where(
-        np.isin(pr_idxs, mincut_sets[0]), GC_PR_FGD, GC_PR_BGD
-    )
-    return mask
+    updated_mask = mask.copy().reshape(-1)
+    updated_mask[mincut_sets[0]] = GC_FGD
+    updated_mask[mincut_sets[1]] = GC_BGD
+    return updated_mask.reshape(mask.shape)
 
 
 def check_convergence(energy):
     # TODO: implement convergence check
+    print(f"energy={energy}")
     global previous_energy
     convergence = (
-        False if previous_energy is None else (previous_energy - energy) < 0.001
+        False if previous_energy is None else (previous_energy - energy) < EPSILON
     )
     previous_energy = energy
     return convergence
@@ -383,7 +413,8 @@ if __name__ == "__main__":
     img = cv2.imread(input_path)
 
     # Run the GrabCut algorithm on the image and bounding box
-    mask, bgGMM, fgGMM = grabcut(img, rect)
+    f_img = np.asarray(img, dtype=np.float64)
+    mask, bgGMM, fgGMM = grabcut(f_img, rect)
     mask = cv2.threshold(mask, 0, 1, cv2.THRESH_BINARY)[1]
 
     # Print metrics only if requested (valid only for course files)
