@@ -8,48 +8,65 @@ import argparse
 
 def poisson_blend(im_src, im_tgt, im_mask, center):
     # TODO: Implement Poisson blending of the source image onto the target ROI
-    # calculate Laplacian
-    laplacian = calc_image_laplacian(im_src)
     
-    # solve the poisson equation
-    pois_solution = calc_poisson_equation(im_mask, laplacian)
+    # ROI: Region of Interest  
+    roi_src, roi_mask = get_src_roi_crops(im_src, im_mask)
+    x_min, x_max, y_min, y_max = get_tgt_roi_bounds(center, im_tgt.shape[:2], roi_src.shape[:2])
     
-    # blend the images
-    im_blend = blend_images(im_src, im_tgt, im_mask, pois_solution, center)
+    print('roi_src.shape: ', roi_src.shape)
+    print('roi_mask.shape: ', roi_mask.shape)
+    print('roi_tgt.shape: ', im_tgt[y_min:y_max, x_min:x_max].shape)
+    
+    roi_tgt = im_tgt[y_min:y_max, x_min:x_max]
+    for i in range(3): 
+        roi_src[:, :, i] = np.where(roi_mask[...] == 0, roi_tgt[:, :, i], roi_src[:, :, i])          
+    roi_blend = blend_src(roi_src, roi_mask)
+    
+    cv2.imwrite('roi_src.jpg', roi_src)
+    cv2.imwrite('roi_blend.jpg', roi_blend)
+    
+    im_blend = im_tgt # we need to return an "im_blend" variable
+    im_blend[y_min:y_max, x_min:x_max] = roi_blend
+    cv2.imwrite('poisson_blend.jpg', im_blend)
     return im_blend
+  
+   
+def get_src_roi_crops(im_src: np.ndarray, im_mask: np.ndarray) -> tuple():
+    h, w = im_src.shape[:2]
+    
+    # Get the bbox of the mask with 1-pixel padding
+    indices = np.nonzero(im_mask)
+    x_min, y_min = np.min(indices, axis=1)
+    x_max, y_max = np.max(indices, axis=1)
+    x_min = max(0, x_min - 2)
+    x_max = min(h, x_max + 2)
+    y_min = max(0, y_min - 2)
+    y_max = min(w, y_max + 2)
      
-                  
-def calc_image_laplacian(image: np.ndarray) -> np.ndarray:             
-    laplacian = np.zeros_like(image)
-
-    # calculate Laplacian for non-edge pixels
-    laplacian[1:-1, 1:-1] = image[2:, 1:-1] + image[:-2, 1:-1] + image[1:-1, 2:] + image[1:-1, :-2] - 4 * image[1:-1, 1:-1]
-
-    # calculate Laplacian for edge pixels
-    laplacian[0, 1:-1] = image[1, 1:-1] + image[0, 2:] + image[0, :-2] - 3 * image[0, 1:-1]
-    laplacian[-1, 1:-1] = image[-2, 1:-1] + image[-1, 2:] + image[-1, :-2] - 3 * image[-1, 1:-1]
-    laplacian[1:-1, 0] = image[2:, 0] + image[:-2, 0] + image[1:-1, 1] - 3 * image[1:-1, 0]
-    laplacian[1:-1, -1] = image[2:, -1] + image[:-2, -1] + image[1:-1, -2] - 3 * image[1:-1, -1]
+    # Extract the ROI from the source image and mask
+    roi_src = im_src[x_min:x_max, y_min:y_max, :]
+    roi_mask = im_mask[x_min:x_max, y_min:y_max]
     
-    # calculate Laplacian for corner pixels
-    laplacian[0, 0] = image[1, 0] + image[0, 1] - 2 * image[0, 0]
-    laplacian[-1, 0] = image[-2, 0] + image[-1, 1] - 2 * image[-1, 0]
-    laplacian[0, -1] = image[1, -1] + image[0, -2] - 2 * image[0, -1]
-    laplacian[-1, -1] = image[-2, -1] + image[-1, -2] - 2 * image[-1, -1]
-    
-    return laplacian
+    return roi_src, roi_mask
 
 
-def calc_poisson_equation(mask: np.ndarray, laplacian: np.ndarray) -> np.ndarray:
-    h, w = mask.shape[:2]
-    mask_flat = mask.flatten()
-    A = create_poisson_matrix(mask, h, w)
-    x_r = spsolve(A, laplacian[:, :, 0].flatten() * mask_flat)
-    x_g = spsolve(A, laplacian[:, :, 1].flatten() * mask_flat)
-    x_b = spsolve(A, laplacian[:, :, 2].flatten() * mask_flat)
-    return np.dstack((x_r.reshape(mask.shape[:2]), 
-                      x_g.reshape(mask.shape[:2]), 
-                      x_b.reshape(mask.shape[:2])))
+def get_tgt_roi_bounds(center: tuple(), tgt_shp: tuple(), roi_shp: tuple()) -> tuple():
+    x_min = max(0, center[0] - roi_shp[1]//2)
+    x_max = min(tgt_shp[1], x_min + roi_shp[1])
+    y_min = max(0, center[1] - roi_shp[0]//2)
+    y_max = min(tgt_shp[0], y_min + roi_shp[0])
+    return x_min, x_max, y_min, y_max
+
+
+def blend_src(roi_src: np.ndarray, roi_mask: np.ndarray) -> np.ndarray:
+    h, w = roi_src.shape[:2]
+    A = create_poisson_matrix(roi_mask, h, w)
+    x_r = spsolve(A, roi_src[:, :, 0].flatten())
+    x_g = spsolve(A, roi_src[:, :, 1].flatten())
+    x_b = spsolve(A, roi_src[:, :, 2].flatten())
+    return np.dstack((x_r.reshape(roi_src.shape[:2]), 
+                      x_g.reshape(roi_src.shape[:2]), 
+                      x_b.reshape(roi_src.shape[:2])))
     
     
 def create_poisson_matrix(mask: np.ndarray, h: int, w:int) -> scipy.sparse.lil_matrix:
@@ -78,59 +95,10 @@ def create_poisson_matrix(mask: np.ndarray, h: int, w:int) -> scipy.sparse.lil_m
     return A
 
 
-def get_rhs_vector(laplacian: np.ndarray, im_mask: np.ndarray) -> np.ndarray:
-    # Flatten the Laplacian and mask matrices
-    laplacian_flat = laplacian.reshape(-1)
-    mask_flat = im_mask.flatten()
-    
-    # Get the indices of non-zero elements in the mask
-    indices = np.nonzero(mask_flat)
-    
-    # Create the right-hand side vector
-    b = -laplacian_flat * mask_flat
-    b[indices] = 0
-    
-    return b
-
-
-def blend_images(im_src: np.ndarray, im_tgt: np.ndarray, im_mask: np.ndarray, pois_solution: np.ndarray, center: tuple) -> np.ndarray:
-    # how evey arg was ctreated:
-    # im_tgt = cv2.imread(args.tgt_path, cv2.IMREAD_COLOR)
-    # im_src = cv2.imread(args.src_path, cv2.IMREAD_COLOR)
-    # im_mask = cv2.imread(args.mask_path, cv2.IMREAD_GRAYSCALE) and then:
-    # im_mask = cv2.threshold(im_mask, 0, 255, cv2.THRESH_BINARY)[1]
-    # center = (int(im_tgt.shape[1] / 2), int(im_tgt.shape[0] / 2))
-    # pos_solution is the solution of the poisson equation
-    
-    # we need to take the object from the source image and put it on the target image such that the object is centered on the center of the target image
-    # Extract region of interest from source and target images
-    h, w = im_src.shape[:2]
-    y_min = max(0, center[1] - h//2)
-    y_max = min(im_tgt.shape[0], y_min + h)
-    x_min = max(0, center[0] - w//2)
-    x_max = min(im_tgt.shape[1], x_min + w)
-    roi_tgt = im_tgt[y_min:y_max, x_min:x_max]
-    
-    # Blend the source image onto the target ROI using the Poisson solution
-    blended_roi = np.uint8(pois_solution)
-    blended_roi_masked = cv2.bitwise_and(blended_roi, blended_roi, mask=im_mask)
-    roi_tgt_masked = cv2.bitwise_and(roi_tgt, roi_tgt, mask=cv2.bitwise_not(im_mask))
-    result_roi = cv2.add(blended_roi_masked, roi_tgt_masked)
-    cv2.imwrite('0.png', roi_tgt)
-    cv2.imwrite('1.png', blended_roi)
-    cv2.imwrite('2.png', blended_roi_masked)  
-    cv2.imwrite('3.png', roi_tgt_masked)  
-    cv2.imwrite('4.png', result_roi)    
-    
-    # Replace the target ROI with the blended image
-    im_tgt[y_min:y_max, x_min:x_max] = result_roi
-    return im_tgt
-
-
 def parse():
     parser = argparse.ArgumentParser()
     parser.add_argument('--src_path', type=str, default='./data/imgs/banana2.jpg', help='image file path')
-    parser.add_argument('--mask_path', type=str, default='./data/seg_GT/banana1.bmp', help='mask file path')
+    parser.add_argument('--mask_path', type=str, default='./data/seg_GT/banana2.bmp', help='mask file path')
     parser.add_argument('--tgt_path', type=str, default='./data/bg/table.jpg', help='mask file path')
     return parser.parse_args()
 
