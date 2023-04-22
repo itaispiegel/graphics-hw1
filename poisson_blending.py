@@ -58,12 +58,11 @@ def get_tgt_roi_bounds(center: tuple(), tgt_shp: tuple(), roi_shp: tuple()) -> t
 def blend_src(roi_src: np.ndarray, roi_mask: np.ndarray) -> np.ndarray:
     h, w = roi_src.shape[:2]
     A = create_poisson_matrix(roi_mask, h, w)
-    x_r = spsolve(A, roi_src[:, :, 0].flatten())
-    x_g = spsolve(A, roi_src[:, :, 1].flatten())
-    x_b = spsolve(A, roi_src[:, :, 2].flatten())
-    return np.dstack((x_r.reshape(roi_src.shape[:2]), 
-                      x_g.reshape(roi_src.shape[:2]), 
-                      x_b.reshape(roi_src.shape[:2])))
+    roi_blend = np.zeros((h, w, 3))
+    for i in range(3):
+        roi_blend[:, :, i] = spsolve(A, roi_src[:, :, i].flatten()).reshape((h, w))
+        print(roi_blend[:, :, i])
+    return roi_blend.astype(np.uint8)
     
     
 def create_poisson_matrix(mask: np.ndarray, h: int, w:int) -> scipy.sparse.lil_matrix:
