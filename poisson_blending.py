@@ -13,13 +13,8 @@ def poisson_blend(im_src, im_tgt, im_mask, center):
     roi_src, roi_mask = get_src_roi_crops(im_src, im_mask)
     x_min, x_max, y_min, y_max = get_tgt_roi_bounds(center, im_tgt.shape[:2], roi_src.shape[:2])
     
-    print('roi_src.shape: ', roi_src.shape)
-    print('roi_mask.shape: ', roi_mask.shape)
-    print('roi_tgt.shape: ', im_tgt[y_min:y_max, x_min:x_max].shape)
-    
-    roi_tgt = im_tgt[y_min:y_max, x_min:x_max]
     for i in range(3): 
-        roi_src[:, :, i] = np.where(roi_mask[...] == 0, roi_tgt[:, :, i], roi_src[:, :, i])          
+        roi_src[:, :, i] = np.where(roi_mask == 0, im_tgt[y_min:y_max, x_min:x_max][:, :, i], roi_src[:, :, i])          
     roi_blend = blend_src(roi_src, roi_mask)
     
     cv2.imwrite('roi_src.jpg', roi_src)
@@ -27,7 +22,9 @@ def poisson_blend(im_src, im_tgt, im_mask, center):
     
     im_blend = im_tgt # we need to return an "im_blend" variable
     im_blend[y_min:y_max, x_min:x_max] = roi_blend
+    
     cv2.imwrite('poisson_blend.jpg', im_blend)
+    
     return im_blend
   
    
@@ -38,9 +35,9 @@ def get_src_roi_crops(im_src: np.ndarray, im_mask: np.ndarray) -> tuple():
     indices = np.nonzero(im_mask)
     x_min, y_min = np.min(indices, axis=1)
     x_max, y_max = np.max(indices, axis=1)
-    x_min = max(0, x_min - 2)
+    x_min = max(0, x_min - 1)
     x_max = min(h, x_max + 2)
-    y_min = max(0, y_min - 2)
+    y_min = max(0, y_min - 1)
     y_max = min(w, y_max + 2)
      
     # Extract the ROI from the source image and mask
