@@ -22,8 +22,6 @@ def poisson_blend(im_src, im_tgt, im_mask, center):
     roi_blend = blend_src_to_tgt(roi_src, roi_tgt, roi_mask)
     im_blend = im_tgt # we need to return an "im_blend" variable
     im_blend[y_min:y_max, x_min:x_max] = roi_blend
-    
-    cv2.imwrite('poisson_blend.jpg', im_blend.astype(np.uint8))
     return im_blend
   
    
@@ -122,8 +120,8 @@ def get_image_laplacian(src: np.ndarray, tgt: np.ndarray, mask: np.ndarray) -> n
 
 def parse():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--src_path', type=str, default='./data/imgs/banana2.jpg', help='image file path')
-    parser.add_argument('--mask_path', type=str, default='./data/seg_GT/banana2.bmp', help='mask file path')
+    parser.add_argument('--src_path', type=str, default='./data/imgs/banana1.jpg', help='image file path')
+    parser.add_argument('--mask_path', type=str, default='./data/seg_GT/banana1.bmp', help='mask file path')
     parser.add_argument('--tgt_path', type=str, default='./data/bg/table.jpg', help='mask file path')
     return parser.parse_args()
 
@@ -146,3 +144,4 @@ if __name__ == "__main__":
     cv2.imshow('Cloned image', im_clone)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
+    
