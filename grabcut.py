@@ -52,7 +52,7 @@ class Component:
 class GaussianMixture:
     def __init__(self, n_components: int):
         self.n_components = n_components
-        self._kmeans = KMeans(n_components, n_init="auto")
+        self._kmeans = KMeans(n_components, n_init="auto", random_state=0)
         self._initialized = False
         self.components = None
         self.data_points = None
@@ -293,6 +293,7 @@ def grabcut(img, rect, n_iter=5):
     mask[y : y + h, x : x + w] = GC_PR_FGD
     mask[rect[1] + rect[3] // 2, rect[0] + rect[2] // 2] = GC_FGD
 
+    img = np.asarray(img, dtype=np.float64)
     bgGMM, fgGMM = initalize_GMMs(img, mask)
 
     for i in range(n_iter):
@@ -413,8 +414,7 @@ if __name__ == "__main__":
     img = cv2.imread(input_path)
 
     # Run the GrabCut algorithm on the image and bounding box
-    f_img = np.asarray(img, dtype=np.float64)
-    mask, bgGMM, fgGMM = grabcut(f_img, rect)
+    mask, bgGMM, fgGMM = grabcut(img, rect)
     mask = cv2.threshold(mask, 0, 1, cv2.THRESH_BINARY)[1]
 
     # Print metrics only if requested (valid only for course files)
