@@ -1,7 +1,6 @@
 import argparse
 
 import cv2
-import matplotlib.pyplot as plt
 import numpy as np
 import scipy.sparse
 from scipy.sparse.linalg import spsolve
@@ -22,12 +21,12 @@ def poisson_blend(im_src, im_tgt, im_mask, center):
     roi_tgt = im_tgt[y_min:y_max, x_min:x_max]
 
     roi_blend = blend_src_to_tgt(roi_src, roi_tgt, roi_mask)
-    im_blend = im_tgt  # we need to return an "im_blend" variable
+    im_blend = im_tgt.copy()  # we need to return an "im_blend" variable
     im_blend[y_min:y_max, x_min:x_max] = roi_blend
-    return im_blend
+    return im_blend.astype(np.uint8)
 
 
-def get_src_roi_crops(im_src: np.ndarray, im_mask: np.ndarray) -> tuple():
+def get_src_roi_crops(im_src: np.ndarray, im_mask: np.ndarray) -> tuple:
     h, w = im_src.shape[:2]
 
     # Get the bbox of the mask with 1-pixel padding
@@ -64,8 +63,7 @@ def blend_src_to_tgt(src: np.ndarray, tgt: np.ndarray, mask: np.ndarray) -> np.n
             (h, w)
         )
 
-    roi_blend[roi_blend > 255] = 255
-    roi_blend[roi_blend < 0] = 0
+    roi_blend = np.clip(roi_blend, 0, 255)
     return roi_blend
 
 
