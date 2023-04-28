@@ -1,9 +1,10 @@
 import argparse
-import itertools
+import time
 
 import cv2
 import igraph as ig
 import numpy as np
+from scipy.stats import multivariate_normal
 from sklearn.cluster import KMeans
 
 GC_BGD = 0  # Hard bg pixel
@@ -29,24 +30,14 @@ class Component:
     def __init__(self, data_points, total_points_count, mean=None):
         self.data_points = data_points
         self.mean = mean if mean is not None else np.mean(data_points, axis=0)
-        # Avoid singular matrix by adding epsilon on the diagonal
-        self.covariance_matrix = np.cov(
-            self.data_points, rowvar=False
-        ) + EPSILON * np.eye(3)
-        self.covariance_matrix_det = np.linalg.det(self.covariance_matrix)
-        self.covariance_matrix_inverse = np.linalg.inv(self.covariance_matrix)
+        self.covariance_matrix = np.cov(self.data_points, rowvar=False)
         self.weight = len(data_points) / total_points_count
-        self.k = self.mean.shape[0]
-
-    def calc_scores(self, X):
-        diff = X - self.mean
-        exponent = np.einsum(
-            "ij, ij->i", -0.5 * diff, diff @ self.covariance_matrix_inverse.T
+        self._multivariate_normal = multivariate_normal(
+            self.mean, self.covariance_matrix, allow_singular=True, seed=0
         )
 
-        return (
-            1 / np.sqrt((2 * np.pi) ** self.k * self.covariance_matrix_det)
-        ) * np.exp(exponent)
+    def calc_pdfs(self, X):
+        return self._multivariate_normal.pdf(X)
 
 
 class GaussianMixture:
@@ -80,21 +71,23 @@ class GaussianMixture:
 
     @require_initialization
     def calc_probs(self, X):
-        probs = (
-            np.array([c.calc_scores(X) for c in self.components]) + EPSILON
-        )  # Add epsilon to avoid zero
+        probs = np.array([c.calc_pdfs(X) for c in self.components])
         return np.dot(self.weights, probs)
 
     @require_initialization
     def assign_points_to_components(self, X):
-        probs = np.array([c.calc_scores(X) for c in self.components]).T
-        return np.argmax(probs, axis=1)
+        probs = np.array([c.calc_pdfs(X) for c in self.components])
+        return np.argmax(probs, axis=0)
 
     @require_initialization
     def update(self, X):
         labels = self.assign_points_to_components(X)
         for i in range(self.n_components):
             assigned_pixels = X[labels == i]
+            if len(assigned_pixels) <= 1:
+                self.n_components -= 1
+                self.components.pop(i)
+                return self.update(X)
             self.components[i] = Component(assigned_pixels, total_points_count=len(X))
 
 
@@ -307,6 +300,10 @@ def grabcut(img, rect, n_iter=5):
         if check_convergence(energy):
             break
 
+    img = img.astype(np.uint8)
+    mask[mask == GC_PR_BGD] = GC_BGD
+    mask[mask == GC_PR_FGD] = GC_FGD
+
     # Return the final mask and the GMMs
     return mask, bgGMM, fgGMM
 
@@ -337,7 +334,7 @@ def calculate_mincut(img, mask, bgGMM, fgGMM):
 def update_mask(mincut_sets, mask):
     # TODO: implement mask update step
     updated_mask = mask.copy().reshape(-1)
-    updated_mask[mincut_sets[0]] = GC_FGD
+    updated_mask[mincut_sets[0]] = GC_PR_FGD
     updated_mask[mincut_sets[1]] = GC_BGD
     return updated_mask.reshape(mask.shape)
 
@@ -355,14 +352,10 @@ def check_convergence(energy):
 
 def cal_metric(predicted_mask, gt_mask):
     # TODO: implement metric calculation
-    copied_mask = predicted_mask.copy()
-    copied_mask[copied_mask == GC_PR_BGD] = GC_BGD
-    copied_mask[copied_mask == GC_PR_FGD] = GC_FGD
+    accuracy = np.count_nonzero(predicted_mask == gt_mask) / predicted_mask.size
 
-    accuracy = np.count_nonzero(copied_mask == gt_mask) / copied_mask.size
-
-    intersection = np.logical_and(copied_mask, gt_mask)
-    union = np.logical_or(copied_mask, gt_mask)
+    intersection = np.logical_and(predicted_mask, gt_mask)
+    union = np.logical_or(predicted_mask, gt_mask)
     jaccard = intersection.sum() / union.sum()
 
     return accuracy, jaccard
@@ -414,7 +407,9 @@ if __name__ == "__main__":
     img = cv2.imread(input_path)
 
     # Run the GrabCut algorithm on the image and bounding box
+    start_time = time.time()
     mask, bgGMM, fgGMM = grabcut(img, rect)
+    elapsed = time.time() - start_time
     mask = cv2.threshold(mask, 0, 1, cv2.THRESH_BINARY)[1]
 
     # Print metrics only if requested (valid only for course files)
@@ -422,7 +417,7 @@ if __name__ == "__main__":
         gt_mask = cv2.imread(f"data/seg_GT/{args.input_name}.bmp", cv2.IMREAD_GRAYSCALE)
         gt_mask = cv2.threshold(gt_mask, 0, 1, cv2.THRESH_BINARY)[1]
         acc, jac = cal_metric(mask, gt_mask)
-        print(f"Accuracy={acc}, Jaccard={jac}")
+        print(f"Accuracy={acc:.3f}, Jaccard={jac:.3f}, elapsed={elapsed:.3f}")
 
     # Apply the final mask to the input image and display the results
     img_cut = img * (mask[:, :, np.newaxis])
