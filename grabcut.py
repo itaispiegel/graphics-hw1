@@ -71,7 +71,7 @@ class GaussianMixture:
 
     @require_initialization
     def calc_probs(self, X):
-        probs = np.array([c.calc_pdfs(X) for c in self.components])
+        probs = np.array([c.calc_pdfs(X) for c in self.components]) + EPSILON
         return np.dot(self.weights, probs)
 
     @require_initialization
@@ -271,7 +271,7 @@ def partition_pixels(img, mask):
 
 
 # Define the GrabCut algorithm function
-def grabcut(img, rect, n_iter=5):
+def grabcut(img, rect, n_iter=5, components=5):
     # Assign initial labels to the pixels based on the bounding box
     mask = np.zeros(img.shape[:2], dtype=np.uint8)
     mask.fill(GC_BGD)
@@ -287,7 +287,7 @@ def grabcut(img, rect, n_iter=5):
     mask[rect[1] + rect[3] // 2, rect[0] + rect[2] // 2] = GC_FGD
 
     img = np.asarray(img, dtype=np.float64)
-    bgGMM, fgGMM = initalize_GMMs(img, mask)
+    bgGMM, fgGMM = initalize_GMMs(img, mask, components)
 
     for i in range(n_iter):
         # Update GMM
@@ -385,6 +385,18 @@ def parse():
         default="1,1,100,100",
         help="if you wish change the rect (x,y,w,h",
     )
+    parser.add_argument(
+        "--components",
+        type=int,
+        default=5,
+        help="if you wish to change the number of components",
+    )
+    parser.add_argument(
+        "--output_file",
+        type=str,
+        default="",
+        help="if you wish to save the output file",
+    )
     return parser.parse_args()
 
 
@@ -408,7 +420,7 @@ if __name__ == "__main__":
 
     # Run the GrabCut algorithm on the image and bounding box
     start_time = time.time()
-    mask, bgGMM, fgGMM = grabcut(img, rect)
+    mask, bgGMM, fgGMM = grabcut(img, rect, components=args.components)
     elapsed = time.time() - start_time
     mask = cv2.threshold(mask, 0, 1, cv2.THRESH_BINARY)[1]
 
@@ -417,10 +429,15 @@ if __name__ == "__main__":
         gt_mask = cv2.imread(f"data/seg_GT/{args.input_name}.bmp", cv2.IMREAD_GRAYSCALE)
         gt_mask = cv2.threshold(gt_mask, 0, 1, cv2.THRESH_BINARY)[1]
         acc, jac = cal_metric(mask, gt_mask)
-        print(f"Accuracy={acc:.3f}, Jaccard={jac:.3f}, elapsed={elapsed:.3f}")
+        print(
+            f"Accuracy={acc:.3f}, Jaccard={jac:.3f}, elapsed={elapsed:.3f}, components={args.components}"
+        )
 
     # Apply the final mask to the input image and display the results
     img_cut = img * (mask[:, :, np.newaxis])
+    if args.output_file:
+        cv2.imwrite(args.output_file, img_cut)
+
     cv2.imshow("Original Image", img)
     cv2.imshow("GrabCut Mask", 255 * mask)
     cv2.imshow("GrabCut Result", img_cut)
